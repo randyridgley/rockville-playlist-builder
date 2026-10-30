@@ -26,9 +26,15 @@ class Provider(Protocol):
         ...
 
 
-def build_playlist(provider: Provider, name: str, description: str, tracks: list[Track], progress=None) -> PlaylistResult:
+def build_playlist(
+    provider: Provider, name: str, description: str, tracks: list[Track], progress=None, limit: int | None = None
+) -> PlaylistResult:
+    """Match tracks in order and create the playlist. With `limit`, stop once that many have matched,
+    so tracks after it act as spares for ones the catalog doesn't have."""
     ids, missing = [], []
     for track in tracks:
+        if limit is not None and len(ids) >= limit:
+            break
         track_id = provider.find(track)
         if track_id and track_id not in ids:
             ids.append(track_id)

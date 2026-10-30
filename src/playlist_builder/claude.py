@@ -1,4 +1,4 @@
-"""Claude calls: read the lineup poster, and pick deep cuts from Last.fm candidates."""
+"""Claude calls: read the lineup poster, pick deep cuts from Last.fm candidates, and turn a description into songs."""
 
 import base64
 import io
@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from .config import CLAUDE_MODEL
 from .lastfm import Candidate
-from .models import Artist, Lineup
+from .models import Artist, Lineup, Track
 
 # Base64 adds ~33%; the API caps images at 5 MB encoded.
 MAX_IMAGE_BYTES = 3_700_000
@@ -41,6 +41,18 @@ class _ArtistPicks(BaseModel):
 
 class _DeepCuts(BaseModel):
     picks: list[_ArtistPicks]
+
+
+class _Song(BaseModel):
+    artist: str
+    title: str
+    deep_cut: bool
+
+
+class _DescribedPlaylist(BaseModel):
+    name: str
+    description: str
+    songs: list[_Song]
 
 
 EXTRACT_PROMPT = """This is a music festival lineup poster. Extract every performing act and rank how \
@@ -85,6 +97,29 @@ skits, live versions, remixes, re-recordings, and near-duplicates of the hits.
 Choose only from the titles listed, copying each title exactly as written.
 
 {payload}"""
+
+
+DESCRIBE_PROMPT = """You are a music curator building an Apple Music playlist from this request:
+
+<request>
+{request}
+</request>
+
+Choose {total} songs, in playlist order. The first {count} are the playlist; the remaining {spares} are \
+spares, used in order if earlier songs aren't on Apple Music, so make them just as good a fit.
+
+Rules:
+- Only real, released studio recordings. Give the artist's name and the song's title as they appear on \
+streaming services, without "(Remastered)", "(Live)" or similar suffixes. Never invent a song; if you're \
+unsure a track exists, pick another.
+- Follow the request closely: genre, era, mood, tempo, named artists, and anything it says to include or \
+avoid. If it names specific songs, include them.
+- Unless the request asks otherwise, mix well-known songs with a few deep cuts, spread the artists out \
+(at most 3 songs per artist, never the same artist twice in a row), and sequence for flow: a strong \
+opener, a sensible energy arc, and a good closer.
+- Set `deep_cut` true for album tracks and lesser-known songs, false for singles and hits.
+- `name`: a short playlist title (under 50 characters). `description`: one or two sentences describing \
+the playlist for a listener."""
 
 
 def _image_block(path: Path) -> dict:
@@ -169,3 +204,18 @@ class Claude:
             for p in result.picks:
                 picks[p.artist] = p.titles
         return picks
+
+    def describe_playlist(self, request: str, count: int, spares: int) -> tuple[str, str, list[Track]]:
+        """Turn a free-text description into a playlist name, description, and count + spares songs."""
+        prompt = DESCRIBE_PROMPT.format(request=request, count=count, spares=spares, total=count + spares)
+        result: _DescribedPlaylist = self._parse(prompt, _DescribedPlaylist, effort="high")
+        tracks, seen = [], set()
+        for song in result.songs:
+            key = (song.artist.casefold().strip(), song.title.casefold().strip())
+            if song.artist.strip() and song.title.strip() and key not in seen:
+                seen.add(key)
+                tracks.append(Track(
+                    artist=song.artist.strip(), title=song.title.strip(),
+                    kind="deep_cut" if song.deep_cut else "hit", tier=1,
+                ))
+        return result.name.strip(), result.description.strip(), tracks

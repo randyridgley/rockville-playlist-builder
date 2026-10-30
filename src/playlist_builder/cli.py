@@ -13,7 +13,7 @@ from .config import ConfigError
 from .models import DEFAULT_QUOTAS, Lineup, Track, parse_quotas
 from .selection import order_tracks, select_tracks
 
-app = typer.Typer(help="Turn a festival lineup poster into a tier-weighted Apple Music playlist.")
+app = typer.Typer(help="Build Apple Music playlists from a festival lineup poster or a description of what you want.")
 console = Console()
 
 TIER_NAMES = {1: "Headliner", 2: "Sub-headliner", 3: "Mid-card", 4: "Undercard"}
@@ -35,12 +35,13 @@ def _show_lineup(lineup: Lineup) -> None:
     console.print("Tier counts: " + ", ".join(f"{TIER_NAMES[t]} {counts.get(t, 0)}" for t in (1, 2, 3, 4)))
 
 
-def _show_tracks(tracks: list[Track]) -> None:
+def _show_tracks(tracks: list[Track], show_tier: bool = True) -> None:
     table = Table(title=f"Playlist: {len(tracks)} tracks")
-    for col in ("#", "Artist", "Title", "Type", "Tier"):
+    for col in ("#", "Artist", "Title", "Type") + (("Tier",) if show_tier else ()):
         table.add_column(col)
     for i, t in enumerate(tracks, 1):
-        table.add_row(str(i), t.artist, t.title, "deep cut" if t.kind == "deep_cut" else "hit", str(t.tier))
+        row = [str(i), t.artist, t.title, "deep cut" if t.kind == "deep_cut" else "hit"]
+        table.add_row(*row, *([str(t.tier)] if show_tier else []))
     console.print(table)
 
 
@@ -165,15 +166,17 @@ def build(
     _create_playlist(provider, playlist_name, description, tracks)
 
 
-def _create_playlist(provider, playlist_name: str, description: str, tracks: list[Track]) -> None:
+def _create_playlist(provider, playlist_name: str, description: str, tracks: list[Track], limit: int | None = None) -> None:
     from .providers import build_playlist
 
     provider.authenticate()
+    wanted = min(limit, len(tracks)) if limit else len(tracks)
     with Progress(console=console) as progress:
         task = progress.add_task(f"Matching on {provider.name}", total=len(tracks))
-        result = build_playlist(provider, playlist_name, description, tracks, lambda: progress.advance(task))
+        result = build_playlist(provider, playlist_name, description, tracks, lambda: progress.advance(task), limit)
+        progress.update(task, completed=len(tracks))
     console.print(
-        f"[green]{provider.name}:[/green] added {result.added}/{len(tracks)} tracks"
+        f"[green]{provider.name}:[/green] added {result.added}/{wanted} tracks"
         + (f": {result.url}" if result.url else " (check your library)")
     )
     for t in result.not_found:
@@ -181,9 +184,54 @@ def _create_playlist(provider, playlist_name: str, description: str, tracks: lis
 
 
 @app.command()
+def describe(
+    request: Annotated[str, typer.Argument(help='What you want, e.g. "90s alt-rock for a night drive, no grunge"')],
+    count: Annotated[int, typer.Option("--count", "-c", min=1, max=300, help="Number of songs")] = 30,
+    name: Annotated[Optional[str], typer.Option("--name", "-n", help="Playlist name (default: Claude suggests one)")] = None,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Pick the songs but don't create the playlist")] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt")] = False,
+    out_dir: Annotated[Path, typer.Option("--out", help="Where to save tracks.json")] = Path("output"),
+):
+    """Describe the songs you want in plain English and get an Apple Music playlist."""
+    from .claude import Claude
+    from .providers import get_provider
+
+    try:
+        provider = None if dry_run else get_provider("apple")
+        claude = Claude()
+    except ConfigError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+
+    # Ask for spares so songs Apple Music doesn't carry (or that Claude misremembered) can be replaced.
+    spares = max(5, count // 4)
+    with console.status(f"Choosing {count} songs with Claude…"):
+        suggested_name, description, tracks = claude.describe_playlist(request, count, spares)
+    playlist_name = name or suggested_name
+
+    console.print(f"[bold]{playlist_name}[/bold]: {description}")
+    _show_tracks(tracks[:count], show_tier=False)
+    if len(tracks) > count:
+        console.print(f"[dim]+ {len(tracks) - count} spares, used if songs above aren't on Apple Music[/dim]")
+
+    run_dir = out_dir / _slug(playlist_name)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "request.txt").write_text(request + "\n")
+    (run_dir / "tracks.json").write_text(json.dumps([t.model_dump() for t in tracks], indent=2))
+    console.print(f"Saved track list to [bold]{run_dir / 'tracks.json'}[/bold]")
+
+    if dry_run:
+        return
+    if not yes and not typer.confirm(f"Create this playlist on {provider.name}?", default=True):
+        raise typer.Exit(1)
+    _create_playlist(provider, playlist_name, f"{description} Built with playlist-builder.", tracks, limit=count)
+
+
+@app.command()
 def push(
     tracks_file: Annotated[Path, typer.Argument(exists=True, dir_okay=False, help="A tracks.json from a previous build")],
     name: Annotated[str, typer.Option("--name", "-n", help="Playlist name")],
+    count: Annotated[Optional[int], typer.Option("--count", "-c", min=1, help="Stop after this many matches (later tracks are spares)")] = None,
 ):
     """Create the playlist from a saved tracks.json exactly as reviewed (no re-picking)."""
     from .providers import get_provider
@@ -193,7 +241,7 @@ def push(
         f"{len(tracks)} tracks weighted by festival billing: hits from the headliners down, "
         "plus a few deep cuts. Built with playlist-builder."
     )
-    _create_playlist(get_provider("apple"), name, description, tracks)
+    _create_playlist(get_provider("apple"), name, description, tracks, limit=count)
 
 
 @app.command()
