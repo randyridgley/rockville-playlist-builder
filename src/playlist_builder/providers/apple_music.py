@@ -6,6 +6,7 @@ your Apple ID, and the page posts the token back to the CLI.
 """
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -39,7 +40,8 @@ document.addEventListener('musickitloaded', async () => {
   btn.onclick = async () => {
     try {
       const userToken = await MusicKit.getInstance().authorize();
-      await fetch('/token', {method: 'POST', body: userToken});
+      const resp = await fetch('token', {method: 'POST', body: userToken});
+      if (!resp.ok) throw new Error('local server rejected the token (' + resp.status + ')');
       document.getElementById('status').textContent = 'Done. You can close this tab.';
     } catch (e) {
       document.getElementById('status').textContent = 'Sign-in failed: ' + e;
@@ -47,6 +49,16 @@ document.addEventListener('musickitloaded', async () => {
   };
 });
 </script></body></html>"""
+
+
+def _write_private(path: Path, text: str) -> None:
+    """Write a secret file that is owner-only from the moment it exists."""
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    os.chmod(path, 0o600)  # O_CREAT's mode doesn't apply if the file already existed
 
 
 class AppleMusic:
@@ -84,11 +96,8 @@ class AppleMusic:
 
     def _login(self) -> None:
         page = LOGIN_PAGE % {"token": json.dumps(self.developer_token)}
-        result = wait_for_browser(f"http://{LOGIN_HOST}:{LOGIN_PORT}/", LOGIN_HOST, LOGIN_PORT, page_html=page)
-        self.user_token = result["token"]
-        TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-        TOKEN_FILE.write_text(json.dumps({"token": self.user_token}))
-        TOKEN_FILE.chmod(0o600)
+        self.user_token = wait_for_browser(LOGIN_HOST, LOGIN_PORT, page)
+        _write_private(TOKEN_FILE, json.dumps({"token": self.user_token}))
 
     def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
         headers = {"Authorization": f"Bearer {self.developer_token}", "Music-User-Token": self.user_token or ""}
