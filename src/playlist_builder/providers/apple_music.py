@@ -137,6 +137,37 @@ class AppleMusic:
                 best, best_score = song["id"], score
         return best
 
+    def _paged(self, path: str):
+        while path:
+            data = self._request("GET", path).json()
+            yield from data.get("data", [])
+            path = data.get("next", "").removeprefix("/v1")  # `next` is a full path like /v1/me/...
+
+    def find_playlist(self, name: str) -> str | None:
+        """ID of the library playlist with this exact name (case-insensitive), or None."""
+        for p in self._paged("/me/library/playlists?limit=100"):
+            if p.get("attributes", {}).get("name", "").casefold() == name.casefold():
+                return p["id"]
+        return None
+
+    def playlist_tracks(self, playlist_id: str) -> list[tuple[str, str, str | None]]:
+        """(artist, title, catalog song ID) for each song already on a library playlist."""
+        out = []
+        try:
+            for song in self._paged(f"/me/library/playlists/{playlist_id}/tracks?limit=100"):
+                attrs = song.get("attributes", {})
+                out.append((attrs.get("artistName", ""), attrs.get("name", ""), attrs.get("playParams", {}).get("catalogId")))
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code != 404 or out:  # Apple answers 404 for an empty playlist
+                raise
+        return out
+
+    def add_tracks(self, playlist_id: str, track_ids: list[str]) -> None:
+        """Append songs to a library playlist. Only works on playlists this app created."""
+        songs = [{"id": i, "type": "songs"} for i in track_ids]
+        for i in range(0, len(songs), 100):
+            self._request("POST", f"/me/library/playlists/{playlist_id}/tracks", json={"data": songs[i : i + 100]})
+
     def create_playlist(self, name: str, description: str, track_ids: list[str]) -> str | None:
         songs = [{"id": i, "type": "songs"} for i in track_ids]
         resp = self._request("POST", "/me/library/playlists", json={

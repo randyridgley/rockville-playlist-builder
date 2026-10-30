@@ -1,4 +1,4 @@
-from .base import PlaylistResult, Provider, build_playlist
+from .base import PlaylistResult, Provider, add_to_playlist, build_playlist
 
 
 def get_provider(name: str = "apple") -> Provider:
@@ -10,4 +10,4 @@ def get_provider(name: str = "apple") -> Provider:
     raise ValueError(f"Unknown platform '{name}'. Only 'apple' is supported.")
 
 
-__all__ = ["PlaylistResult", "Provider", "build_playlist", "get_provider"]
+__all__ = ["PlaylistResult", "Provider", "add_to_playlist", "build_playlist", "get_provider"]

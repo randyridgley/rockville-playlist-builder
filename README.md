@@ -72,6 +72,14 @@ uv run playlist-builder describe "rainy Sunday morning: acoustic indie, nothing 
 
 Claude also picks about 25% extra songs as spares. If a song isn't on Apple Music (or doesn't exist), the next spare takes its place, so you still get `--count` songs. The run saves `request.txt` and `tracks.json` under `output/<playlist-name>/`; to create a playlist from an edited list, run `push tracks.json --name "..." --count 30`.
 
+To add songs to a playlist instead of making a new one, pass `--add-to` with its name:
+
+```bash
+uv run playlist-builder describe "deeper cuts by Afroman, Petey Pablo, and similar" --add-to "Monster Mash Up: Halloween House Party" --count 20
+```
+
+Claude sees what's already on the playlist, matches its style, and doesn't repeat songs. New songs go at the end, because Apple's API can't reorder a playlist. It only works on playlists this app created; ones you made in the Music app are read-only to the API. Each addition is saved as `added-<timestamp>.json`.
+
 Song picks come from Claude's own knowledge, so very recent releases may be missing.
 
 Tracks that aren't found on Apple Music are listed at the end of the run. They're usually regional exclusives or very small acts.

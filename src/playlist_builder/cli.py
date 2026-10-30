@@ -1,5 +1,6 @@
 import json
 import re
+import time
 from collections import Counter
 from pathlib import Path
 from typing import Annotated, Optional
@@ -170,11 +171,14 @@ def _create_playlist(provider, playlist_name: str, description: str, tracks: lis
     from .providers import build_playlist
 
     provider.authenticate()
-    wanted = min(limit, len(tracks)) if limit else len(tracks)
     with Progress(console=console) as progress:
         task = progress.add_task(f"Matching on {provider.name}", total=len(tracks))
         result = build_playlist(provider, playlist_name, description, tracks, lambda: progress.advance(task), limit)
         progress.update(task, completed=len(tracks))
+    _report(provider, result, min(limit, len(tracks)) if limit else len(tracks))
+
+
+def _report(provider, result, wanted: int) -> None:
     console.print(
         f"[green]{provider.name}:[/green] added {result.added}/{wanted} tracks"
         + (f": {result.url}" if result.url else " (check your library)")
@@ -188,43 +192,80 @@ def describe(
     request: Annotated[str, typer.Argument(help='What you want, e.g. "90s alt-rock for a night drive, no grunge"')],
     count: Annotated[int, typer.Option("--count", "-c", min=1, max=300, help="Number of songs")] = 30,
     name: Annotated[Optional[str], typer.Option("--name", "-n", help="Playlist name (default: Claude suggests one)")] = None,
+    add_to: Annotated[Optional[str], typer.Option("--add-to", help="Add the songs to this existing playlist instead of making a new one")] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Pick the songs but don't create the playlist")] = False,
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt")] = False,
     out_dir: Annotated[Path, typer.Option("--out", help="Where to save tracks.json")] = Path("output"),
 ):
-    """Describe the songs you want in plain English and get an Apple Music playlist."""
+    """Describe the songs you want in plain English and get an Apple Music playlist (or add to one)."""
     from .claude import Claude
     from .providers import get_provider
 
     try:
-        provider = None if dry_run else get_provider("apple")
+        # --add-to reads the playlist even on a dry run, so Claude can avoid repeats.
+        provider = None if dry_run and not add_to else get_provider("apple")
         claude = Claude()
     except ConfigError as e:
         console.print(f"[red]{e}[/red]")
         raise typer.Exit(1)
 
+    playlist_id, existing = None, []
+    if add_to:
+        provider.authenticate()
+        with console.status(f"Reading '{add_to}' from {provider.name}…"):
+            playlist_id = provider.find_playlist(add_to)
+            if playlist_id:
+                existing = provider.playlist_tracks(playlist_id)
+        if not playlist_id:
+            console.print(f"[red]No playlist named '{add_to}' in your {provider.name} library.[/red]")
+            raise typer.Exit(1)
+        console.print(f"'{add_to}' has {len(existing)} songs; Claude will avoid repeating them.")
+
     # Ask for spares so songs Apple Music doesn't carry (or that Claude misremembered) can be replaced.
     spares = max(5, count // 4)
     with console.status(f"Choosing {count} songs with Claude…"):
-        suggested_name, description, tracks = claude.describe_playlist(request, count, spares)
-    playlist_name = name or suggested_name
+        suggested_name, description, tracks = claude.describe_playlist(
+            request, count, spares, exclude=[f"{a} - {t}" for a, t, _ in existing]
+        )
+    if add_to:
+        have = {(a.casefold(), t.casefold()) for a, t, _ in existing}
+        tracks = [t for t in tracks if (t.artist.casefold(), t.title.casefold()) not in have]
+    playlist_name = add_to or name or suggested_name
 
-    console.print(f"[bold]{playlist_name}[/bold]: {description}")
+    if not add_to:
+        console.print(f"[bold]{playlist_name}[/bold]: {description}")
     _show_tracks(tracks[:count], show_tier=False)
     if len(tracks) > count:
         console.print(f"[dim]+ {len(tracks) - count} spares, used if songs above aren't on Apple Music[/dim]")
 
     run_dir = out_dir / _slug(playlist_name)
     run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "request.txt").write_text(request + "\n")
-    (run_dir / "tracks.json").write_text(json.dumps([t.model_dump() for t in tracks], indent=2))
-    console.print(f"Saved track list to [bold]{run_dir / 'tracks.json'}[/bold]")
+    # Additions get their own timestamped files so they don't overwrite the original list.
+    stem = f"added-{time.strftime('%Y%m%d-%H%M%S')}" if add_to else "tracks"
+    (run_dir / f"{stem}.request.txt" if add_to else run_dir / "request.txt").write_text(request + "\n")
+    tracks_path = run_dir / f"{stem}.json"
+    tracks_path.write_text(json.dumps([t.model_dump() for t in tracks], indent=2))
+    console.print(f"Saved track list to [bold]{tracks_path}[/bold]")
 
     if dry_run:
         return
-    if not yes and not typer.confirm(f"Create this playlist on {provider.name}?", default=True):
+    action = f"Add these to '{add_to}'" if add_to else "Create this playlist"
+    if not yes and not typer.confirm(f"{action} on {provider.name}?", default=True):
         raise typer.Exit(1)
-    _create_playlist(provider, playlist_name, f"{description} Built with playlist-builder.", tracks, limit=count)
+    if not add_to:
+        _create_playlist(provider, playlist_name, f"{description} Built with playlist-builder.", tracks, limit=count)
+        return
+
+    from .providers import add_to_playlist
+
+    with Progress(console=console) as progress:
+        task = progress.add_task(f"Matching on {provider.name}", total=len(tracks))
+        result = add_to_playlist(
+            provider, playlist_id, tracks, lambda: progress.advance(task), limit=count,
+            skip_ids={cid for _, _, cid in existing if cid},
+        )
+        progress.update(task, completed=len(tracks))
+    _report(provider, result, min(count, len(tracks)))
 
 
 @app.command()

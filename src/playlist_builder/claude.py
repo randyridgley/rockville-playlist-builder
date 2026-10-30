@@ -205,9 +205,19 @@ class Claude:
                 picks[p.artist] = p.titles
         return picks
 
-    def describe_playlist(self, request: str, count: int, spares: int) -> tuple[str, str, list[Track]]:
-        """Turn a free-text description into a playlist name, description, and count + spares songs."""
+    def describe_playlist(
+        self, request: str, count: int, spares: int, exclude: list[str] | None = None
+    ) -> tuple[str, str, list[Track]]:
+        """Turn a free-text description into a playlist name, description, and count + spares songs.
+
+        `exclude` lists "Artist - Title" songs already on the playlist, which Claude must not repeat.
+        """
         prompt = DESCRIBE_PROMPT.format(request=request, count=count, spares=spares, total=count + spares)
+        if exclude:
+            prompt += (
+                "\n\nThese songs are going onto an existing playlist that already has the songs below. Fit "
+                "its style, and don't repeat any of them:\n" + "\n".join(f"- {s}" for s in exclude)
+            )
         result: _DescribedPlaylist = self._parse(prompt, _DescribedPlaylist, effort="high")
         tracks, seen = [], set()
         for song in result.songs:
