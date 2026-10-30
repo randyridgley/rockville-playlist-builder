@@ -5,7 +5,7 @@ import unicodedata
 
 # Variants that are almost never what you want on a "best of" playlist.
 JUNK_PATTERN = re.compile(
-    r"\b(live|remix|mix|demo|acoustic|instrumental|karaoke|commentary|interview|"
+    r"\b(live|remix|mix|mixed|intro|demo|acoustic|instrumental|karaoke|commentary|interview|"
     r"edit|version|session|rehearsal|bootleg|cover|tribute|reprise|8-bit|lullaby)\b",
     re.IGNORECASE,
 )
@@ -62,6 +62,15 @@ def score_candidate(artist: str, title: str, cand_artists: list[str], cand_title
             score -= 40
         if re.search(r"\blive\b", cand_album, re.IGNORECASE):
             score -= 30
-    if norm_artist(cand_artists[0]) == norm_artist(artist):
+        if re.search(r"\bDJ Mix\b", cand_album, re.IGNORECASE):
+            score -= 40  # a track sliced out of a continuous DJ set
+    # Credits in the title that weren't asked for often mean a regional remix of the hit.
+    if re.search(r"\b(feat|ft|with)\b", cand_title, re.IGNORECASE) and not re.search(
+        r"\b(feat|ft|with)\b", title, re.IGNORECASE
+    ):
+        score -= 3
+    # Apple joins credits into one string ("Cardi B, Bad Bunny & J Balvin"), so compare the first name.
+    primary = re.split(r",\s*|\s+&\s+|\s+x\s+", cand_artists[0])[0]
+    if norm_artist(primary) == norm_artist(artist):
         score += 5  # primary artist rather than a feature
     return score

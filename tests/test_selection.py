@@ -63,6 +63,15 @@ def test_score_candidate_prefers_studio_and_checks_artist():
     assert score_candidate("The Offspring", "Self Esteem", ["Offspring"], "Self Esteem") >= 100
 
 
+def test_score_candidate_avoids_dj_mixes_and_remix_credits():
+    album = score_candidate("Ciara", "1, 2 Step", ["Ciara"], "1, 2 Step (feat. Missy Elliott)", "Goodies")
+    dj = score_candidate("Ciara", "1, 2 Step", ["Ciara"], "1, 2 Step (feat. Missy Elliott) [Mixed]", "Dance Therapy (DJ Mix)")
+    assert album > dj
+    hit = score_candidate("Cardi B", "I Like It", ["Cardi B, Bad Bunny & J Balvin"], "I Like It", "Invasion of Privacy")
+    remix = score_candidate("Cardi B", "I Like It", ["Cardi B"], "I Like It (feat. Kontra K and AK Ausserkontrolle)")
+    assert hit > remix
+
+
 def test_order_spreads_heavily_weighted_artists():
     lineup = Lineup(artists=[Artist(name=f"A{i}", tier=1 if i < 4 else 4) for i in range(80)])
     candidates = {a.name: cands(30) for a in lineup.artists}
